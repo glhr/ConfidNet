@@ -9,9 +9,20 @@ from confidnet.learners.learner import AbstractLeaner
 from confidnet.utils import misc
 from confidnet.utils.logger import get_logger
 from confidnet.utils.metrics import Metrics
+from confidnet.models.mlp_selfconfid import MLPSelfConfid
 
 LOGGER = get_logger(__name__, level="DEBUG")
 
+def pred_forward(self,x):
+    # See note [TorchScript super()]
+    #pred = self.pred_network(x)
+    _, uncertainty = self.uncertainty_network(x)
+    return uncertainty
+
+def gt_forward(self,x):
+    # See note [TorchScript super()]
+    pred = self.pred_network(x)
+    return pred
 
 class SelfConfidLearner(AbstractLeaner):
     def __init__(self, config_args, train_loader, val_loader, test_loader, start_epoch, device):
@@ -128,8 +139,53 @@ class SelfConfidLearner(AbstractLeaner):
         if self.scheduler:
             self.scheduler.step()
 
+    def laplace(self, dataset, batch_size, len_dataset, split="test", verbose=False, **args):
+        from laplace import Laplace
+        from copy import deepcopy
+
+        print("laplace coming to town")
+        gt_model = deepcopy(self.model)
+        gt_model.forward = gt_forward.__get__(gt_model, MLPSelfConfid)
+        gt_model.eval()
+
+        pred_model = deepcopy(self.model)
+        pred_model.forward = pred_forward.__get__(pred_model, MLPSelfConfid)
+        pred_model.eval()
+
+        #print(dict(self.model.named_modules()).keys())
+        la = Laplace(pred_model, 'regression',
+                     subset_of_weights="last_layer",
+                     hessian_structure='diag',
+                     last_layer_name="uncertainty_network.uncertainty5")
+
+        class WorkaroundDataset(torch.utils.data.Dataset):
+            def __init__(self, dataset, model):
+                self._dataset = dataset
+                self.model = model
+
+            def __len__(self):
+                return len(self._dataset)
+
+            def __getitem__(self, idx):
+                img = self._dataset[idx][0].to(gt_model.device)
+                cls =  torch.LongTensor([self._dataset[idx][1]]).to(gt_model.device)
+                pred = gt_model(img.unsqueeze(0)).squeeze(0)
+                conf = pred[cls]
+                return img, conf
+
+        dloader = torch.utils.data.DataLoader(WorkaroundDataset(dataset,self.model),batch_size=batch_size)
+
+        la.fit(dloader)
+
+        for batch_id, (data, target) in enumerate(dloader):
+            print(data.shape, target.shape, target[0])
+            print(la(data)[0][:5],target[:5])
+            break
+
     def evaluate(self, dloader, len_dataset, split="test", verbose=False, **args):
         self.model.eval()
+
+
         metrics = Metrics(self.metrics, len_dataset, self.num_classes)
         loss = 0
 

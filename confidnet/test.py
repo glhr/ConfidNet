@@ -92,6 +92,15 @@ def main():
             samples=args.samples,
             verbose=True,
         )
+        _, scores_test = learner.laplace(
+            dloader.test_dataset,
+            dloader.batch_size,
+            learner.prod_test_len,
+            split="test",
+            mode=args.mode,
+            samples=args.samples,
+            verbose=True,
+        )
 
     # Special case TrustScore
     else:
